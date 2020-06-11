@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.29509.3
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PCATApp", "PCATApp\PCATApp.csproj", "{9C81E1C4-EF91-435F-B58A-241BD482002D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9C81E1C4-EF91-435F-B58A-241BD482002D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9C81E1C4-EF91-435F-B58A-241BD482002D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9C81E1C4-EF91-435F-B58A-241BD482002D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9C81E1C4-EF91-435F-B58A-241BD482002D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {891C5A1D-8D1C-4FC0-9A62-EECBE80D84BB}
+	EndGlobalSection
+EndGlobal

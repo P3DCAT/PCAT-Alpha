@@ -1,0 +1,760 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Windows.Forms;
+using System.Diagnostics;
+using System.Text;
+using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+namespace PCATApp {
+    enum FileType {
+        FILE,
+        FOLDER
+    }
+
+    public partial class PCAT : Form {
+        Dictionary<String, String> filePathMap = new Dictionary<String, String>();
+        private FolderSelectDialog userFolders = new FolderSelectDialog();
+        private FolderSelectDialog baseFolders = new FolderSelectDialog();
+        private Dictionary<String, List<String>> bamToTextureMap = new Dictionary<String, List<String>>();
+        private Dictionary<String, List<String>> textureToBamMap = new Dictionary<String, List<String>>();
+        private TreeNode baseContent = new TreeNode();
+        private TreeNode userContent = new TreeNode();
+        private string tempFolder = null;
+        private char[] trimQuotes = new char[] { '"' };
+        private Task indexTask = null;
+        private IntPtr hWindOriginalParent;
+        private IntPtr hWndDocked;
+        private string FullPath;
+        private string BasePath;
+
+        public PCAT() {
+            filePathMap.Add("PNGInput", string.Empty);
+            filePathMap.Add("JPGInput", string.Empty);
+            filePathMap.Add("RGBInput", string.Empty);
+            filePathMap.Add("fileDir", string.Empty);
+            filePathMap.Add("noExtInput", string.Empty);
+
+            InitializeComponent();
+        }
+
+        [DllImport("user32.dll")]
+        static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+        private string GetTempFolder() {
+            if (tempFolder == null) {
+                tempFolder = Path.Combine(Path.GetTempPath(), "PCAT");
+
+                if (!Directory.Exists(tempFolder)) {
+                    Directory.CreateDirectory(tempFolder);
+                }
+            }
+
+            return tempFolder;
+        }
+
+        private void DeleteTempFolder() {
+            if (tempFolder == null) {
+                return;
+            }
+
+            // i dont wanna use this yet p scary DeleteDirectory(tempFolder);
+            //Directory.Delete(tempFolder);
+            tempFolder = null;
+        }
+
+        // https://stackoverflow.com/questions/329355/cannot-delete-directory-with-directory-deletepath-true
+
+        public static void DeleteDirectory(string target_dir) {
+            string[] files = Directory.GetFiles(target_dir);
+            string[] dirs = Directory.GetDirectories(target_dir);
+
+            foreach (string file in files) {
+                File.SetAttributes(file, FileAttributes.Normal);
+                File.Delete(file);
+                }
+
+            foreach (string dir in dirs) {
+                DeleteDirectory(dir);
+                }
+
+            Directory.Delete(target_dir, false);
+            }
+
+        private string GetAbsolutePathFromRelative(string relativePath) {
+            TreeNodeCollection currentCollection = fileTreeView.Nodes;
+            TreeNode node = null;
+
+            foreach (string part in relativePath.Split('/')) {
+                TreeNode nextNode = null;
+
+                foreach (TreeNode currentNode in currentCollection) {
+                    if (currentNode.Text.Equals(part)) {
+                        nextNode = currentNode;
+                        break;
+                    }
+                }
+
+                if (nextNode == null) {
+                    return null;
+                }
+
+                node = nextNode;
+                currentCollection = nextNode.Nodes;
+            }
+
+            return node.Name;
+        }
+
+        private void UpdateTextureMap(string baseFolder, TreeNode node) {
+            string path = node.Name;
+            string lower = path.ToLower();
+
+            if (!lower.EndsWith(".bam") && !lower.EndsWith(".egg")) {
+                return;
+            }
+
+            if (bamToTextureMap.ContainsKey(path)) {
+                return;
+            }
+
+            string basename = Path.GetFileNameWithoutExtension(path);
+            List<string> textures = null;
+
+            if (lower.EndsWith(".bam")) {
+                string tempFolder = GetTempFolder();
+                string tempEgg = Path.Combine(tempFolder, basename + ".egg");
+
+                ProcessStartInfo startInfo = new ProcessStartInfo();
+                startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+                startInfo.FileName = Program.GetPandaProgram("bam2egg");
+                startInfo.Arguments = String.Format("{0} -o {1}", path, tempEgg);
+                startInfo.UseShellExecute = false;
+                startInfo.RedirectStandardOutput = true;
+                startInfo.CreateNoWindow = true;
+                Process process = new Process();
+                process.StartInfo = startInfo;
+
+                process.Start();
+                while(!process.StandardOutput.EndOfStream) {
+                    String line = process.StandardOutput.ReadLine();
+                    if(line.Equals(":util:bam(error): Bam file is version")) {
+                        process.Kill();
+                        //WARNING: Cannot convert file!
+                        return;
+                        }
+                    }
+                process.WaitForExit();
+                textures = ParseEggFile(tempEgg);
+                File.Delete(tempEgg);
+            } else if (lower.EndsWith(".egg")) {
+                textures = ParseEggFile(path);
+            } else {
+                return;
+            }
+
+            bamToTextureMap[path] = textures;
+        }
+
+        /*
+         * Takes an egg file (i.e. a converted bam2egg file) and parses it, so we can easily locate texpaths.
+         */
+        private List<string> ParseEggFile(string eggFile) {
+            List<string> textures = new List<string>();
+            bool beganTexture = false;
+
+            foreach (string fLine in File.ReadLines(eggFile, Encoding.UTF8)) {
+                string line = fLine.Trim();
+
+                if (line.StartsWith("<VertexPool>")) {
+                    break;
+                }
+
+                if (line.StartsWith("<Texture>")) {
+                    beganTexture = true;
+                } else if (beganTexture && line.StartsWith("\"")) {
+                    string texture = GetAbsolutePathFromRelative(line.Trim(trimQuotes));
+                    beganTexture = false;
+
+                    if (texture == null) {
+                        //MessageBox.Show("Not found: " + line.Trim(trimQuotes));
+                        continue;
+                    }
+
+                    textures.Add(texture);
+                }
+            }
+
+            return textures;
+        }
+
+        private void UpdateTextureMap(string baseFolder, TreeNodeCollection collection) {
+            foreach (TreeNode node in collection) {
+                if (node.Tag.Equals(FileType.FOLDER)) {
+                    UpdateTextureMap(baseFolder, node.Nodes);
+                } else {
+                    UpdateTextureMap(baseFolder, node);
+                }
+            }
+        }
+
+        private bool IsBuildingIndex() {
+            return indexTask != null;
+        }
+
+        private void StartUpdateTextureMap(string baseFolder) {
+            if (indexTask != null) {
+                MessageBox.Show("The index is already building!", "PCAT", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            BuildingIndexLabel.Show();
+            indexTask = Task.Run(() => UpdateTextureMap(baseFolder));
+        }
+
+        private void FinishUpdateTextureMap() {
+            BuildingIndexLabel.Hide();
+        }
+
+        private void UpdateTextureMap(string baseFolder) {
+            UpdateTextureMap(baseFolder, fileTreeView.Nodes);
+            DeleteTempFolder();
+            UpdateReverseTextureMap();
+            indexTask = null;
+            Invoke(new Action(FinishUpdateTextureMap));
+        }
+
+        private void UpdateReverseTextureMap() {
+            textureToBamMap.Clear();
+
+            foreach (string bamFile in bamToTextureMap.Keys) {
+                foreach (string textureFile in bamToTextureMap[bamFile]) {
+                    if (!textureToBamMap.ContainsKey(textureFile)) {
+                        textureToBamMap[textureFile] = new List<string>();
+                    }
+
+                    textureToBamMap[textureFile].Add(bamFile);
+                }
+            }
+        }
+
+        private void settingsToolStripMenuItem_Click(object sender, EventArgs e) {
+
+        }
+
+        private void preferencesToolStripMenuItem_Click(object sender, EventArgs e) {
+            var fileContent = string.Empty;
+            //var filePath = string.Empty;
+
+            using (PreferencesWindow PrefWindow = new PreferencesWindow()) {
+                PrefWindow.ShowDialog();
+            }
+        }
+
+
+        /*
+        * Note: 
+        * Using this method can prove the dictionary feature a bit redundant when bit comes to having them as global variables.
+        * Probably recommended to eventually instantiate the dictionary in the scope of the method below.
+        * We could still keep the feature of the global dictionary for checking with selected files, however.
+        */
+        private void PNGSplit(object sender, EventArgs e) {
+            this.openToolFileWindow();
+
+            if (!filePathMap["PNGInput"].Equals(string.Empty) && !filePathMap["noExtInput"].Equals(string.Empty)) {
+                Console.WriteLine(filePathMap["PNGInput"]);
+                PNGSplit split = new PNGSplit(filePathMap["PNGInput"]);
+                split.exportAlphaImage(filePathMap["fileDir"] + "\\" + filePathMap["noExtInput"] + "_a.png");
+            } else {
+                /*
+                 * All code here will be ran when the user cancels out of the menu.
+                 */
+                Console.WriteLine("Filepath cannot be null!");
+            }
+
+        }
+
+
+        /*
+         * This method is only used to open up a new file window for tools such as PNG split, combine, etc.
+         * Will not append those images to the list
+         */
+        private void openToolFileWindow() {
+            //var filePath = string.Empty;
+            using (OpenFileDialog openFileDialog = new OpenFileDialog()) {
+                openFileDialog.InitialDirectory = "c:\\";
+                openFileDialog.Filter = "txt files (*.txt)|*.txt|All files (*.*)|*.*";
+                openFileDialog.FilterIndex = 2;
+                openFileDialog.RestoreDirectory = true;
+
+                if (openFileDialog.ShowDialog() == DialogResult.OK) {
+                    //Get the path of specified file
+                    filePathMap["PNGInput"] = openFileDialog.FileName;
+                    filePathMap["noExtInput"] = Path.GetFileNameWithoutExtension(openFileDialog.FileName);
+                    filePathMap["fileDir"] = Path.GetDirectoryName(openFileDialog.FileName);
+                }
+            }
+
+        }
+
+
+        private void toolStrippngSplitButton_Click(object sender, EventArgs e) {
+            PNGSplit(sender, e);
+
+        }
+
+        private void panel1_Paint(object sender, PaintEventArgs e) {
+
+        }
+
+        private void toolStripContainer1_TopToolStripPanel_Click(object sender, EventArgs e) {
+
+        }
+
+        private void toolStripContainer1_RightToolStripPanel_Click(object sender, EventArgs e) {
+
+        }
+
+        private void toolStripContainer1_ContentPanel_Load(object sender, EventArgs e) {
+
+        }
+
+        private void toolStrip1_ItemClicked(object sender, ToolStripItemClickedEventArgs e) {
+
+        }
+
+        private void menuStrip2_ItemClicked(object sender, ToolStripItemClickedEventArgs e) {
+
+        }
+
+        private void flowLayoutPanel1_Paint(object sender, PaintEventArgs e) {
+
+        }
+
+        private void splitter1_SplitterMoved(object sender, SplitterEventArgs e) {
+
+        }
+
+
+        private void importToolStripMenuItem_Click(object sender, EventArgs e) {
+
+        }
+
+        private void toolStripButton2_Click(object sender, EventArgs e) {
+            this.openToolFileWindow();
+
+            if (!filePathMap["JPGInput"].Equals(string.Empty) && !filePathMap["RGBInput"].Equals(string.Empty)) {
+                PNGCombine combine = new PNGCombine(filePathMap["JPGInput"], filePathMap["RGBInput"]);
+                combine.exportImage(filePathMap["fileDir"] + "\\" + filePathMap["noExtInput"] + "_o.png");
+            } else {
+                Console.WriteLine("Filepaths cannot be null!");
+            }
+        }
+
+
+        private void pictureBox1_Click(object sender, EventArgs e) {
+
+        }
+
+
+        private void fileFolderToolStripMenuItem_Click(object sender, EventArgs e) {
+            //var filePath = string.Empty;
+
+            using (OpenFileDialog openFileDialog = new OpenFileDialog()) {
+                openFileDialog.InitialDirectory = "c:\\";
+                openFileDialog.Filter = "txt files (*.txt)|*.txt|All files (*.*)|*.*";
+                openFileDialog.FilterIndex = 2;
+                openFileDialog.RestoreDirectory = true;
+
+                if (openFileDialog.ShowDialog() == DialogResult.OK) {
+                    //Get the path of specified file
+                    filePathMap["PNGInput"] = openFileDialog.FileName;
+                    filePathMap["noExtInput"] = Path.GetFileNameWithoutExtension(openFileDialog.FileName);
+                    filePathMap["fileDir"] = Path.GetDirectoryName(openFileDialog.FileName);
+                    //this.filePath = filePath;
+
+                    //Read the contents of the file into a bitmap
+                    Bitmap fs = new Bitmap(openFileDialog.FileName);
+                    SelectedImagePanel.Image = fs;
+                }
+            }
+        }
+
+        private void multifileToolStripMenuItem_Click(object sender, EventArgs e) {
+
+        }
+
+        private void Form1_Load(object sender, EventArgs e) {
+            BuildingIndexLabel.Hide();
+        }
+
+        private void PNGCombineButtonOld_Click(object sender, EventArgs e) {
+            Form dlg1 = new Form();
+            dlg1.ShowDialog();
+        }
+
+        private void label1_Click(object sender, EventArgs e) {
+
+        }
+
+        private void tabPage2_Click(object sender, EventArgs e) {
+
+        }
+
+        private void listBox1_SelectedIndexChanged(object sender, EventArgs e) {
+
+        }
+
+        /*
+         * Make all of the children(files) in each subdirectory a new node, recursively. 
+         * Note: probably want to implement this for associated files list in the future.
+         */
+        private static TreeNode CreateDirectoryNode(DirectoryInfo directoryInfo) {
+            var directoryNode = new TreeNode(directoryInfo.Name);
+            directoryNode.Name = directoryInfo.FullName;
+            directoryNode.Tag = FileType.FOLDER;
+
+            foreach (var directory in directoryInfo.GetDirectories()) {
+                directoryNode.Nodes.Add(CreateDirectoryNode(directory));
+            }
+
+            foreach (var file in directoryInfo.GetFiles()) {
+                var fileNode = new TreeNode(file.Name);
+                fileNode.Name = file.FullName;
+                fileNode.Tag = FileType.FILE;
+                directoryNode.Nodes.Add(fileNode);
+            }
+
+            return directoryNode;
+        }
+        /*
+         * Used to import file(s) into the TreeNode
+         */
+        private void fileFolderToolStripMenuItem1_Click(object sender, EventArgs e) {
+            if (IsBuildingIndex()) {
+                MessageBox.Show("You cannot import new files while the index is building!", "PCAT", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            OpenFileDialog dialog = new OpenFileDialog();
+            dialog.Title = "Select files";
+            dialog.Multiselect = true;
+            dialog.ShowDialog();
+
+            foreach (string filename in dialog.FileNames) {
+                if (fileTreeView.Nodes.ContainsKey(filename)) {
+                    fileTreeView.Nodes.RemoveByKey(filename);
+                }
+
+                TreeNode node = new TreeNode(Path.GetFileName(filename));
+                node.Name = filename;
+                node.Tag = FileType.FILE;
+                fileTreeView.Nodes.Add(node);
+            }
+
+            //StartUpdateTextureMap();
+        }
+
+        private void ConvertFeature_Click(object sender, EventArgs e) {
+
+        }
+
+        private void toolStripMenuItem1_Click(object sender, EventArgs e) {
+
+        }
+
+        private void MultifileDropDown_Click(object sender, EventArgs e) {
+
+        }
+
+        private void toolStrip1_ItemClicked_1(object sender, ToolStripItemClickedEventArgs e) {
+
+        }
+
+        /*
+          Intent:
+          1) open folder, a bulk of files, or one, 
+          2) pick where to save the newly extracted files, 
+          3) run extract code on those selected files with progress bar (output in folder previously stated in 2
+          4) show dialog when done & ask if you want to open folder to saved directory
+         */
+        // thank you microsoft https://docs.microsoft.com/en-us/dotnet/api/system.windows.forms.openfiledialog.multiselect?view=netframework-4.8
+        private void extractMultifilesToolStripMenuItem_Click(object sender, EventArgs e) {
+                using (MFExtractWindow OutWindow = new MFExtractWindow()) {
+                    OutWindow.ShowDialog();
+                }
+            
+        }
+
+        /* 
+         * We probably need to refactor this code to the MFBuildWindow code since it gets called before the window is shown.
+         */
+        private void buildMultifilesToolStripMenuItem_Click(object sender, EventArgs e) {
+
+            using (MFBuildWindow OutWindow = new MFBuildWindow()) {
+                OutWindow.ShowDialog();
+            }
+        }
+
+        private void PNGSplitTextureButton_Click(object sender, EventArgs e) {
+            PNGSplit(sender, e);
+        }
+
+        private void aboutToolStripMenuItem_Click(object sender, EventArgs e) {
+            var fileContent = string.Empty;
+            //var filePath = string.Empty;
+
+            using (AboutWindow AboutWindow = new AboutWindow()) {
+                AboutWindow.ShowDialog();
+            }
+        }
+
+        /*
+         * Intent:
+         * Open selected multifile(s), copy them to the project (or temp) folder, extract them in a new subfolder.
+         * ./project1/resources/extractMF/
+         * Unless there's a better approach for this...
+         */
+        private void ImportMultifileButton_Click(object sender, EventArgs e) {
+
+        }
+
+        /*
+         * Opens a open folder dialog to add folder(s) to the Tree
+         * Dialog that displays when appending phase files/content to the list.
+         */
+        private void toolStripMenuItem3_Click(object sender, EventArgs e) {
+            if (IsBuildingIndex()) {
+                MessageBox.Show("You cannot import new folders while the index is building!", "PCAT", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            FolderSelectDialog dialog = new FolderSelectDialog();
+            dialog.Title = "Select multifile folders";
+            dialog.Multiselect = true;
+            dialog.ShowDialog();
+
+            foreach (string directory in dialog.FileNames) {
+                DirectoryInfo dir = new DirectoryInfo(directory);
+                string directoryName = dir.FullName;
+                Console.WriteLine("DirectoryName: " + directoryName);
+                if (fileTreeView.Nodes.ContainsKey(directoryName)) {
+                    //if(FilesAreEqual(new FileInfo(directoryName)))
+                    fileTreeView.Nodes.RemoveByKey(directoryName);
+                }
+
+                fileTreeView.Nodes.Add(CreateDirectoryNode(dir));
+            }
+
+            StartUpdateTextureMap("");
+        }
+
+        const int BYTES_TO_READ = sizeof(Int64);
+        //https://stackoverflow.com/questions/1358510/how-to-compare-2-files-fast-using-net
+        static bool FilesAreEqual(FileInfo first, FileInfo second) {
+            if (first.Length != second.Length)
+                return false;
+
+            if (string.Equals(first.FullName, second.FullName, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            int iterations = (int)Math.Ceiling((double)first.Length / BYTES_TO_READ);
+
+            using (FileStream fs1 = first.OpenRead())
+            using (FileStream fs2 = second.OpenRead()) {
+                byte[] one = new byte[BYTES_TO_READ];
+                byte[] two = new byte[BYTES_TO_READ];
+
+                for (int i = 0; i < iterations; i++) {
+                    fs1.Read(one, 0, BYTES_TO_READ);
+                    fs2.Read(two, 0, BYTES_TO_READ);
+
+                    if (BitConverter.ToInt64(one, 0) != BitConverter.ToInt64(two, 0))
+                        return false;
+                    }
+                }
+
+            return true;
+            }
+
+
+        /* 
+         * Using the file tree, if a user selects a file that's a supported image format, 
+         * the file will become the image displayed on the image panel.
+         */
+        private void fileTreeView_AfterSelect(object sender, TreeViewEventArgs e) {
+            LaunchPviewButton1.Visible = false;
+            if (e.Node.Tag.Equals(FileType.FOLDER)) {
+                return;
+            }
+
+            /*
+             * https://social.msdn.microsoft.com/Forums/windows/en-US/790cd8be-0ba8-4f10-95a8-c88f1023d6e7/how-can-i-create-a-quotrightclick-menuquot-i-c?forum=winforms
+             * this only shows on the node that's selected (im sleepy rn)
+             */
+            ContextMenuStrip mnu = new ContextMenuStrip();
+            ToolStripMenuItem mnuCopy = new ToolStripMenuItem("Copy");
+            ToolStripMenuItem mnuCut = new ToolStripMenuItem("Cut");
+            ToolStripMenuItem mnuPaste = new ToolStripMenuItem("Paste");
+            //Assign event handlers
+            //mnuCopy.Click += new EventHandler(mnuCopy_Click);
+            //mnuCut.Click += new EventHandler(mnuCut_Click);
+            //mnuPaste.Click += new EventHandler(mnuPaste_Click);
+            //Add to main context menu
+            mnu.Items.AddRange(new ToolStripItem[] { mnuCopy, mnuCut, mnuPaste });
+            fileTreeView.ContextMenuStrip = mnu;
+
+            string fullPath = e.Node.Name;
+            string lower = fullPath.ToLower();
+            this.FullPath = fullPath;
+
+            AssociatedList.Nodes.Clear();
+            List<string> associatedFiles = new List<string>();
+
+            if (bamToTextureMap.ContainsKey(fullPath)) {
+                associatedFiles = bamToTextureMap[fullPath];
+            } else if (textureToBamMap.ContainsKey(fullPath)) {
+                associatedFiles = textureToBamMap[fullPath];
+            }
+
+            if (lower.EndsWith(".jpg") || lower.EndsWith(".png") || lower.EndsWith(".jpeg") || lower.EndsWith(".bmp") || lower.EndsWith(".tiff")) {
+                SelectedImagePanel.Image = new Bitmap(fullPath);
+            }
+            else if(lower.EndsWith(".bam")) {
+                LaunchPviewButton1.Visible = true;
+            }
+
+
+            associatedFiles.Sort();
+
+            foreach (string file in associatedFiles) {
+                TreeNode node = new TreeNode(file);
+                node.Name = file;
+                node.Tag = FileType.FILE;
+                AssociatedList.Nodes.Add(node);
+            }
+        }
+
+
+        private void MayaTools_Click(object sender, EventArgs e) {
+
+        }
+
+        private void UserFileSearchBox_Click(object sender, EventArgs e) {
+
+        }
+
+        private void button1_Click(object sender, EventArgs e) {
+            Console.WriteLine("button");
+        }
+
+        private void PNGCombineTextureButton_Click(object sender, EventArgs e) {
+            toolStripButton2_Click(sender, e);
+        }
+
+        private void AssociatedList_AfterSelect(object sender, TreeViewEventArgs e) {
+            if (e.Node.Tag.Equals(FileType.FOLDER)) {
+                return;
+                }
+
+            string fullPath = e.Node.Name;
+            string lower = fullPath.ToLower();
+
+            if (lower.EndsWith(".jpg") || lower.EndsWith(".png") || lower.EndsWith(".jpeg") || lower.EndsWith(".bmp") || lower.EndsWith(".tiff")) {
+                OriginalTTContentPanel.Image = new Bitmap(fullPath);
+                }
+            }
+
+        private void OriginalTTContentPanel_Click(object sender, EventArgs e) {
+            }
+
+        private void LaunchPviewButton1_Click(object sender, EventArgs e) {
+            string path = this.FullPath;
+            //if (!path.ToLower().EndsWith(".bam") || !path.ToLower().EndsWith(".egg")) {
+            //    return;
+            //}
+            //string tempEgg = Path.Combine(tempFolder, basename + ".egg");
+
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+            startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+            startInfo.FileName = Program.GetPandaProgram("pview");
+            startInfo.Arguments = path;
+
+            Process process = new Process();
+            process.StartInfo = startInfo;
+            process.Start();
+            process.Refresh();
+            Thread.Sleep(2000);
+
+            Console.WriteLine(process.Id);
+            Console.WriteLine(process.MainWindowHandle);
+            //process.WaitForInputIdle();
+
+
+            //Process p = Process.Start("notepad.exe");
+            //p.WaitForInputIdle();
+            //SetParent(process.MainWindowHandle, SelectedImagePanel.Handle);
+            //process.WaitForExit();
+        }
+
+        private void jPGToolStripMenuItem_Click(object sender, EventArgs e) {
+
+        }
+
+        private void pNGToolStripMenuItem_Click(object sender, EventArgs e) {
+
+        }
+
+        private void RightClickMenu_Opening(object sender, System.ComponentModel.CancelEventArgs e) {
+
+        }
+
+        private void setBaseFolderToolStripMenuItem_Click(object sender, EventArgs e) {
+            if (IsBuildingIndex()) {
+                MessageBox.Show("Cannot change base folder while index is still building.", "PCAT", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+                }
+
+            FolderSelectDialog dialog = new FolderSelectDialog();
+            dialog.Title = "Select Base directory";
+            dialog.ShowDialog();
+
+            
+
+            foreach (string directory in dialog.FileNames) {
+                if (!(fileTreeView.Nodes.Count == 0)) {
+                    fileTreeView.Nodes.Clear();
+                    baseContent.Nodes.Clear();
+                    }
+                DirectoryInfo dir = new DirectoryInfo(directory);
+                string directoryName = dir.FullName;
+
+                if (fileTreeView.Nodes.ContainsKey(directoryName)) {
+                    fileTreeView.Nodes.RemoveByKey(directoryName);
+                    baseContent.Nodes.RemoveByKey(directoryName);
+                    }
+
+                fileTreeView.Nodes.Add(CreateDirectoryNode(dir));
+                baseContent.Nodes.Add(CreateDirectoryNode(dir));
+                }
+
+            StartUpdateTextureMap("");
+
+            }
+
+        Boolean builtBefore = false;
+        private void BuildModelIndexButton_Click(object sender, EventArgs e) {
+            if(builtBefore) {
+
+                }
+
+            }
+
+        private void BuildBaseModelIndexButton_Click(object sender, EventArgs e) {
+
+            }
+        }
+}
