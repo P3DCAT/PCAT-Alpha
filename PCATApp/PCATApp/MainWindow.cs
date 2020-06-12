@@ -23,8 +23,6 @@ namespace PCATApp {
 
         public PCAT() {
             filePathMap.Add("PNGInput", string.Empty);
-            filePathMap.Add("JPGInput", string.Empty);
-            filePathMap.Add("RGBInput", string.Empty);
             filePathMap.Add("fileDir", string.Empty);
             filePathMap.Add("noExtInput", string.Empty);
 
@@ -61,48 +59,38 @@ namespace PCATApp {
             }
         }
 
-        /*
-        * Note: 
-        * Using this method can prove the dictionary feature a bit redundant when bit comes to having them as global variables.
-        * Probably recommended to eventually instantiate the dictionary in the scope of the method below.
-        * We could still keep the feature of the global dictionary for checking with selected files, however.
-        */
         private void PNGSplit(object sender, EventArgs e) {
-            this.openToolFileWindow();
+            string rgbFile = OpenToolFileWindow("Choose the translucent PNG!", "PNG files (*.png)|*.png|All files (*.*)|*.*");
 
-            if (!filePathMap["PNGInput"].Equals(string.Empty) && !filePathMap["noExtInput"].Equals(string.Empty)) {
-                Console.WriteLine(filePathMap["PNGInput"]);
-                PNGSplit split = new PNGSplit(filePathMap["PNGInput"]);
-                split.exportAlphaImage(filePathMap["fileDir"] + "\\" + filePathMap["noExtInput"] + "_a.png");
-            } else {
-                /*
-                 * All code here will be ran when the user cancels out of the menu.
-                 */
-                Console.WriteLine("Filepath cannot be null!");
+            if (rgbFile == null) {
+                return;
             }
 
+            string root = Path.GetDirectoryName(rgbFile);
+            string filename = Path.GetFileNameWithoutExtension(rgbFile);
+            string finalPath = Path.Combine(root, filename + "_a.png");
+            PNGSplit split = new PNGSplit(rgbFile);
+            split.exportAlphaImage(finalPath);
         }
 
         /*
          * This method is only used to open up a new file window for tools such as PNG split, combine, etc.
          * Will not append those images to the list
          */
-        private void openToolFileWindow() {
-            //var filePath = string.Empty;
+        private string OpenToolFileWindow(string title, string filter) {
             using (OpenFileDialog openFileDialog = new OpenFileDialog()) {
                 openFileDialog.InitialDirectory = "c:\\";
-                openFileDialog.Filter = "txt files (*.txt)|*.txt|All files (*.*)|*.*";
+                openFileDialog.Title = title;
+                openFileDialog.Filter = filter;
                 openFileDialog.FilterIndex = 2;
                 openFileDialog.RestoreDirectory = true;
 
                 if (openFileDialog.ShowDialog() == DialogResult.OK) {
-                    //Get the path of specified file
-                    filePathMap["PNGInput"] = openFileDialog.FileName;
-                    filePathMap["noExtInput"] = Path.GetFileNameWithoutExtension(openFileDialog.FileName);
-                    filePathMap["fileDir"] = Path.GetDirectoryName(openFileDialog.FileName);
+                    return openFileDialog.FileName;
                 }
             }
 
+            return null;
         }
 
         private void MainTreeViewPlsLoadProfilekthx(TreeView treeview) {
@@ -111,18 +99,26 @@ namespace PCATApp {
 
         private void toolStrippngSplitButton_Click(object sender, EventArgs e) {
             PNGSplit(sender, e);
-
         }
 
         private void toolStripButton2_Click(object sender, EventArgs e) {
-            this.openToolFileWindow();
+            string jpgFile = OpenToolFileWindow("Choose the RGB image!", "PNG files (*.png)|*.png|JPG files (*.jpg)|*.jpg|All files (*.*)|*.*");
 
-            if (!filePathMap["JPGInput"].Equals(string.Empty) && !filePathMap["RGBInput"].Equals(string.Empty)) {
-                PNGCombine combine = new PNGCombine(filePathMap["JPGInput"], filePathMap["RGBInput"]);
-                combine.exportImage(filePathMap["fileDir"] + "\\" + filePathMap["noExtInput"] + "_o.png");
-            } else {
-                Console.WriteLine("Filepaths cannot be null!");
+            if (jpgFile == null) {
+                return;
             }
+
+            string rgbFile = OpenToolFileWindow("Choose the Alpha image!", "PNG files (*.png)|*.png|JPG files (*.jpg)|*.jpg|All files(*.*)|*.*");
+
+            if (rgbFile == null) {
+                return;
+            }
+
+            string root = Path.GetDirectoryName(rgbFile);
+            string filename = Path.GetFileNameWithoutExtension(rgbFile);
+            string finalPath = Path.Combine(root, filename + "_c.png");
+            PNGCombine combine = new PNGCombine(jpgFile, rgbFile);
+            combine.exportImage(finalPath);
         }
 
         private void fileFolderToolStripMenuItem_Click(object sender, EventArgs e) {
