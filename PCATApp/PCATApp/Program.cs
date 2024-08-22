@@ -23,7 +23,7 @@ namespace PCATApp {
             Console.WriteLine("PCAT Version " + getPCATVersion());
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new PCAT());
+            Application.Run(new PCAT_PanelWindow());
         }
 
         public static string getPCATVersion() {

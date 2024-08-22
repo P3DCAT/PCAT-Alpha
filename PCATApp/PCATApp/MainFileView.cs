@@ -7,7 +7,7 @@ using System.Drawing;
 namespace PCATApp {
     public class MainFileView {
 
-        private PCAT main;
+        private PCAT_PanelWindow main;
         private TreeView fileView;
         private Button pviewButton;
         private PictureBox imagePreview;
@@ -15,7 +15,9 @@ namespace PCATApp {
         private string selectedPath = null;
         private string lastSelectedMedia = null;
 
-        public MainFileView(PCAT main, TreeView fileView, Button pviewButton, PictureBox imagePreview, bool updateAssociated) {
+        public MainFileView(
+            PCAT_PanelWindow main, TreeView fileView,
+            Button pviewButton, PictureBox imagePreview, bool updateAssociated) {
             this.main = main;
             this.fileView = fileView;
             this.pviewButton = pviewButton;
@@ -51,6 +53,11 @@ namespace PCATApp {
                 TreeNode node = new TreeNode(file);
                 node.Name = file;
                 node.Tag = FileType.FILE;
+                string fullPath = main.GetProfile().ConvertRelativeToFull(file);
+
+                if (!(File.Exists(fullPath))) {
+                    node.ForeColor = Color.Red;
+                }
                 fileView.Nodes.Add(node);
             }
         }
@@ -101,7 +108,11 @@ namespace PCATApp {
             }
 
             if (lower.EndsWith(".jpg") || lower.EndsWith(".png") || lower.EndsWith(".jpeg") || lower.EndsWith(".bmp") || lower.EndsWith(".tiff")) {
-                imagePreview.Image = new Bitmap(fullPath);
+                try {
+                    imagePreview.Image = new Bitmap(fullPath);
+                } catch(Exception exception) {
+                    MessageBox.Show("We had a problem showing this image");
+                }
             } else if (lower.EndsWith(".bam")) {
                 pviewButton.Visible = true;
             }
